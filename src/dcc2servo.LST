@@ -1,0 +1,2076 @@
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE  1
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00001 ;;======================================================================;;
+                      00002 ;;                      DCC 2 SERVO DECODER                             ;;
+                      00003 ;;======================================================================;;
+                      00004 ;;                                                                      ;;
+                      00005 ;; Program:         DCC2SERVO_RELE -- DCC accesory decoder for 2 servo  ;;
+                      00006 ;; Code:            Paco Cañada                                         ;;
+                      00007 ;; Platform:        Microchip PIC12F629, PIC12F675 ; 4 Mhz                              ;;
+                      00008 ;; Modifications for PIC12F675 and more by Arkadiusz Hahn 
+                      00009 ;; Date:            08.06.2005                                          ;;
+                      00010 ;; First release:   13.06.2005                                          ;; 
+                      00011 ;; Last release by Paco  16.09.2005
+                      00012 ;; LastDate:        23.05.2017                                  ;;
+                      00013 
+                      00014 
+                      00015 
+                      00016 ;;                                                                      ;;
+                      00017 ;;======================================================================;;
+                      00018 
+                      00019 ; Minimal external components, uses internal oscilator at 4 MHz
+                      00020 
+                      00021 
+                      00022 ; Decodes only 3 byte packets
+                      00023 ;
+                      00024 ; 1111111111 0 AAAAAAAA 0 DDDDDDDD 0 EEEEEEEE 1
+                      00025 
+                      00026 ; This program is distributed as is but WITHOUT ANY WARRANTY
+                      00027 ; I hope you enjoy!!
+                      00028 ;
+                      00029 ; Revisions:
+                      00030 ; 08.06.2005    Start of writing code
+                      00031 ; 11.06.2005    all servos work and page programming
+                      00032 ; 13.06.2005    changed range for Hitec servos (0,5ms=0º, 1,5ms=90º, 2,5ms=180º)
+                      00033 ; 16.09.2005    interrupt controlled pulses, saving output state, changes in CV number, direct programmi
+                            ng
+                      00034 ; 15.08.2011    changed for 2 servo and 2 relays changing at center position
+                      00035 ; 20.03.2017  modification for PIC12F675 
+                      00036 ; 23.05.2017  Long pressing SWICH (for about 2.5s) enters programming mode 
+                      00037 ;             - both servos move to central positions, outputs set on; 
+                      00038 ;             Direct CV programming and address change is only possibile in programing mode.
+                      00039 ;             Capturing new address or short pressing SWITCH exits programming mode.
+                      00040  
+                      00041 
+                      00042 ; ----- Definitions
+                      00043 
+                      00044 #define         __VERNUM          D'2'
+                      00045 #define         __VERDAY          0x23
+                      00046 #define         __VERMONTH      0x05
+                      00047 #define         __VERYEAR         0x17
+                      00048 
+                      00049 ;This project can be compiled either for PIC12F629 or PIC12F675 processor
+                      00050   LIST     p=12F675     ; default target processor
+                      00051 ; processor 12F675 ; alternative directive for LIST p=
+                      00052 ; LIST     p=12F629     ; alternative target CPU
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE  2
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00053 ;NOTE:  Processor type is superseded by command line switch: C:\MPASM MYFILE.ASM /PIC12F629  
+                      00054 
+                      00055 #IFDEF __12F675
+                      00056   #include p12F675.inc
+                      00001         LIST
+                      00002 
+                      00003 ;==========================================================================
+                      00004 ; Build date : Oct 21 2015
+                      00005 ;  MPASM PIC12F675 processor include
+                      00006 ; 
+                      00007 ;  (c) Copyright 1999-2015 Microchip Technology, All rights reserved
+                      00008 ;==========================================================================
+                      00009 
+                      00367         LIST
+                      00057 #endif
+                      00058 
+                      00059 #IFDEF __12F629
+                      00060   #include p12F629.inc
+                      00061 #endif
+                      00062 
+                      00063         errorlevel -305,-302
+                      00064         
+                      00065 
+2007   3FD4           00066         __CONFIG  _BODEN_ON & _CP_OFF & _WDT_OFF & _MCLRE_OFF & _PWRTE_OFF & _INTRC_OSC_NOCLKOUT 
+                      00067 
+                      00068                                 ; Make sure that internal osc. is calibrated
+                      00069                                 ; Value has to be read before reprogramming the device.
+                      00070         ; Preferred programmer for WIN10 - Michrochip PICkit2
+                      00071 
+                      00072 ; --- Constant values
+                      00073 
+  003D0900            00074 FXTAL           equ     D'4000000'              ; internal oscilator
+                      00075 
+  0000000C            00076 GP_TRIS         equ     0x0C                    ; GP2,GP3: inputs
+  00000000            00077 GP_INI          equ     0x00                    ; all zero
+  00000088            00078 OPTION_INI          equ     0x88                        ; Option register: no pull-up, falling GP2, no p
+                            rescaler, wdt 1:1
+  00000033            00079 WPU_INI               equ           0x33                        ; Weak pull-up enable. default, no pull-
+                            ups
+                      00080 
+  000000D0            00081 INTC_INI        equ     0xD0                    ; GIE, INTE enable, PEIE enable
+  00000001            00082 PIE1_INI        equ     0x01                    ; interrupt TMR1
+                      00083 
+                      00084 
+                      00085 #define         SERVO1  GPIO,5                  ; Servo 1 output
+                      00086 #define         SERVO2  GPIO,4                  ; Servo 2 output
+                      00087 #define         SWITCH  GPIO,3                  ; Programm switch (GPIO,3 only input)
+                      00088 #define         DCCIN   GPIO,2                  ; DCC input pin
+                      00089 #define         RELE2   1                       ; Servo 3 output
+                      00090 #define         RELE1   0                       ; Servo 4 output
+                      00091 
+  00000004            00092 REACH_PULS      equ     0x04                     ; aditional pulses when reached position
+  0000007D            00093 SWITCH_PRESS_LONG equ 0x7d  ; 20ms*125 =  2.5s -  Time to enter programming mode
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE  3
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+  0000000A            00094 SWITCH_PRESS_SHORT equ 0x0A ; 20ms * 10 = 0.2s  - time to exit programming mode
+                      00095 
+                      00096 ; --- EEPROM Section
+                      00097 
+                      00098 #define         EE_INI          0x00
+                      00099 
+  00000000            00100 E_CV513         equ     EE_INI+0x00             ; CV513 Primary Adress low
+  00000002            00101 E_CV515         equ     EE_INI+0x02             ; CV515 Range Servo 1
+  00000003            00102 E_CV516         equ     EE_INI+0x03             ; CV516 Range Servo 2
+                      00103 ;E_CV517        equ     EE_INI+0x04             ; CV517 Range Servo 3
+                      00104 ;E_CV518        equ     EE_INI+0x05             ; CV518 Range Servo 4
+  00000006            00105 E_CV7           equ     EE_INI+0x06             ; Manufacturer Version
+  00000007            00106 E_CV8           equ     EE_INI+0x07             ; Manufacturer ID
+  00000008            00107 E_CV521         equ     EE_INI+0x08             ; CV521 Primary Adress high
+  0000001C            00108 E_CV541         equ     EE_INI+0x1C             ; config
+  00000020            00109 E_CV545         equ     EE_INI+0x20             ; CV545 Spacing
+  00000021            00110 E_CV546         equ     EE_INI+0x21             ; CV546 Accesory flags
+  00000022            00111 E_CV547         equ     EE_INI+0x22             ; CV547 Speed Servo 1
+  00000023            00112 E_CV548         equ     EE_INI+0x23             ; CV548 Speed Servo 2
+                      00113 ;E_CV549        equ     EE_INI+0x24             ; CV549 Speed Servo 3
+                      00114 ;E_CV550        equ     EE_INI+0x25             ; CV550 Speed Servo 4
+                      00115 
+  0000007F            00116 EE_OUT          equ     EE_INI+0x7F             ; saved outputs
+                      00117 
+                      00118 ; ----- Variables
+                      00119 
+                      00120 ; --- Internal RAM Section
+                      00121 
+                      00122 #define         RAMINI0         0x020           ; 64 bytes of RAM
+                      00123 
+  00000020            00124 INT_W           equ     RAMINI0+0x00            ; interrupt context registers
+  00000021            00125 INT_STAT        equ     RAMINI0+0x01
+                      00126 
+  00000022            00127 SHIFT0          equ     RAMINI0+0x02
+  00000023            00128 SHIFT1          equ     RAMINI0+0x03            ; interrupt shift register
+  00000024            00129 SHIFT2          equ     RAMINI0+0x04
+  00000025            00130 SHIFT3          equ     RAMINI0+0x05
+  00000026            00131 SHIFT4          equ     RAMINI0+0x06
+  00000027            00132 SHIFT5          equ     RAMINI0+0x07
+  00000028            00133 DATA00          equ     RAMINI0+0x08
+  00000029            00134 DATA0           equ     RAMINI0+0x09            ; received packet
+  0000002A            00135 DATA1           equ     RAMINI0+0x0A
+  0000002B            00136 DATA2           equ     RAMINI0+0x0B
+  0000002C            00137 DATA3           equ     RAMINI0+0x0C
+                      00138 
+  0000002D            00139 PAGEREG         equ     RAMINI0+0x0D            ; Page register
+                      00140 
+  00000030            00141 CV513           equ     RAMINI0+0x10            ; Primary Adress low byte
+  00000031            00142 CV521           equ     RAMINI0+0x11            ; Primary Adress high byte
+                      00143 
+  00000032            00144 CV515           equ     RAMINI0+0x12            ; Range servo 1
+  00000033            00145 CV516           equ     RAMINI0+0x13            ; Range servo 2
+                      00146 ;CV517          equ     RAMINI0+0x14            ; Range servo 3
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE  4
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00147 ;CV518          equ     RAMINI0+0x15            ; Range servo 4
+                      00148 
+  00000036            00149 CV545           equ     RAMINI0+0x16            ; Spacing
+  00000037            00150 CV546           equ     RAMINI0+0x17            ; accessory flags
+                      00151 
+  00000038            00152 CV547           equ     RAMINI0+0x18            ; Speed servo 1
+  00000039            00153 CV548           equ     RAMINI0+0x19            ; Speed servo 2
+                      00154 ;CV549          equ     RAMINI0+0x1A            ; Speed servo 3
+                      00155 ;CV550          equ     RAMINI0+0x1B            ; Speed servo 4
+                      00156 
+  0000003C            00157 CV547CNT        equ     RAMINI0+0x1C            ; Speed servo 1
+  0000003D            00158 CV548CNT        equ     RAMINI0+0x1D            ; Speed servo 2
+                      00159 ;CV549CNT       equ     RAMINI0+0x1E            ; Speed servo 3
+                      00160 ;CV550CNT       equ     RAMINI0+0x1F            ; Speed servo 4
+                      00161 
+  00000040            00162 FLAGS           equ     RAMINI0+0x20
+  00000041            00163 EEDATA0         equ     RAMINI0+0x21            ; data to write in EEPROM
+  00000042            00164 MOVING          equ     RAMINI0+0x22            ; moving flags
+  00000043            00165 POSITION        equ     RAMINI0+0x23            ; current position flags
+  00000044            00166 STATE             equ   RAMINI0+0x24            ; current state
+  00000045            00167 REACHED         equ     RAMINI0+0x25            ; position reached
+                      00168 
+                      00169 
+  00000048            00170 TEMP              equ   RAMINI0+0x28
+  00000049            00171 COUNT             equ   RAMINI0+0x29
+                      00172 
+  00000050            00173 PULSE1          equ     RAMINI0+0x30            ; pulse duration
+  00000051            00174 PULSE2          equ     RAMINI0+0x31            ; pulse duration
+                      00175 ;PULSE3         equ     RAMINI0+0x32            ; pulse duration
+                      00176 ;PULSE4         equ     RAMINI0+0x33            ; pulse duration
+  00000054            00177 SPACE_H         equ     RAMINI0+0x34            ; spacing duration
+  00000055            00178 SPACE_L         equ     RAMINI0+0x35
+  00000056            00179 MODE      equ RAMINI0+0x36    ;work mode (normal operation | programming)
+  00000047            00180 DEBOUNCE        equ     RAMINI0+0x27            ;programming key debouncing
+  0000005F            00181 OUTPUT          equ     RAMINI0+0x3F
+                      00182 
+                      00183 ; --- Flags
+                      00184 
+                      00185 #define         NEW_PACKET      FLAGS,0         ; New 3 byte packet received
+                      00186 #define         NOCV            FLAGS,1         ; No CV finded
+                      00187 #define         RDONLY          FLAGS,2         ; CV read only
+                      00188 #define         DCC4BYTE        FLAGS,3         ; DCC command 4 bytes
+                      00189 #define         DO_PULSE        FLAGS,5         ; do pulse, TMR1 end
+                      00190 #define         PROG_2X         FLAGS,6         ; 2x prog
+                      00191 #define         RESET_FLG       FLAGS,7         ; reset packet
+                      00192 
+                      00193 #define         SAVE_OUTPUTS    CV546,0         ; Save outputs to EEPROM
+                      00194 #define         PAIR_SEL        CV546,2         ; Pair selection
+                      00195 
+                      00196 #define PROGRAM_MODE       MODE,0   ;programming mode - CV and address programming enabled
+                      00197 
+                      00198 
+                      00199 ; --------------- Program Section --------------------------------------
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE  5
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00200 
+                      00201 
+0000                  00202                 org     0x000
+                      00203 
+0000                  00204 PowerUp:
+0000   0183           00205                 clrf    STATUS                  ; Bank 0 default
+0001   018B           00206                 clrf    INTCON                  ; Disable all interrupts
+0002   018A           00207                 clrf    PCLATH                  ; tables on page 0
+0003   285E           00208                 goto    INIT
+                      00209 
+                      00210 ; ----------------------------------------------------------------------
+                      00211 
+0004                  00212                 org     0x004
+                      00213 
+0004                  00214 Interrupt:
+0004   00A0           00215                 movwf   INT_W                   ; save context registers
+0005   0E03           00216                 swapf   STATUS,w
+0006   00A1           00217                 movwf   INT_STAT
+0007   0183           00218                 clrf    STATUS                  ; interrupt uses bank 0
+                      00219 
+0008   1C0C           00220                 btfss   PIR1,TMR1IF             ; end of servo pulse?
+0009   280E           00221                 goto    Int_DCC
+000A   085F           00222                 movf    OUTPUT,w                ; yes, clear ports
+000B   0085           00223                 movwf   GPIO
+000C   100C           00224                 bcf     PIR1,TMR1IF
+000D   16C0           00225                 bsf     DO_PULSE
+                      00226 
+000E                  00227 Int_DCC:
+000E   1C8B           00228                 btfss   INTCON,INTF             ; GPIO,2 interrupt?
+000F   283B           00229                 goto    EndInt
+                      00230 
+0010   1905           00231                 btfsc   DCCIN
+0011   2819           00232                 goto    Int_High_Half
+0012                  00233 Int_Low_Half:
+0012   30B0           00234                 movlw   d'256' - d'80'          ; 80us: between 64us (one) and 90us (zero)
+0013   0081           00235                 movwf   TMR0
+0014   110B           00236                 bcf     INTCON,T0IF             ; clear overflow flag for counting
+                      00237 
+0015   108B           00238                 bcf     INTCON,INTF             
+0016   1683           00239                 bsf     STATUS,RP0
+0017   1701           00240                 bsf     OPTION_REG,INTEDG       ; next interrupt on rising edge GP2
+0018   283B           00241                 goto    EndInt
+                      00242 
+                      00243 ; 1111111111 CCCCCCCC 0 AAAAAAAA 0 DDDDDDDD 0 EEEEEEEE 1
+                      00244 ; 'x1111111''111 0 CCCC''CCCC 0 AAA' 'AAAAA 0 DD' DDDDDD 0 E' 'EEEEEEE 1'
+                      00245 ;   SHIFT0     SHIFT1      SHIFT2       SHIFT3      SHIFT4      SHIFT5
+                      00246 
+                      00247 ; 1111111111 0 AAAAAAAA 0 DDDDDDDD 0 EEEEEEEE 1
+                      00248 ; 'xxxxxxxx''xx111111''1111 0 AAA' 'AAAAA 0 DD' DDDDDD 0 E' 'EEEEEEE 1'
+                      00249 ;   SHIFT0    SHIFT1     SHIFT2       SHIFT3      SHIFT4      SHIFT5
+                      00250 
+                      00251 
+0019                  00252 Int_High_Half:
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE  6
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0019   1403           00253                 bsf     STATUS,C                                                        ;8
+001A   190B           00254                 btfsc   INTCON,T0IF             ; if timer 0 overflows then is a DCC zero;9
+001B   1003           00255                 bcf     STATUS,C                                                        ;10
+001C   0DA7           00256                 rlf     SHIFT5,f                ; receiver shift register               ;11
+001D   0DA6           00257                 rlf     SHIFT4,f                                                        ;12
+001E   0DA5           00258                 rlf     SHIFT3,f                                                        ;13
+001F   0DA4           00259                 rlf     SHIFT2,f                                                        ;14
+0020   0DA3           00260                 rlf     SHIFT1,f                                                        ;15
+0021   0DA2           00261                 rlf     SHIFT0,f                                                        ;16
+                      00262 
+0022   30C0           00263                 movlw   0xC0                    ; ignore older bits                     ;17
+0023   0423           00264                 iorwf   SHIFT1,w                ;                                       ;18
+0024   3AFF           00265                 xorlw   0xFF                    ;'xx111111' ? first 6 preamble bits     ;19
+0025   1D03           00266                 btfss   STATUS,Z                                                        ;20
+0026   2840           00267                 goto    Int_High_Check4                                                 ;21,22
+                      00268 
+0027                  00269 Int_High_Check3:
+0027   30F8           00270                 movlw   0xF8                    ; check 4 preamble and start bit        ;23
+0028   0524           00271                 andwf   SHIFT2,w                ; '1111 0 xxx'                          ;24
+0029   3AF0           00272                 xorlw   0xF0                                                            ;25
+002A   1D03           00273                 btfss   STATUS,Z                ;                                       ;26
+002B   2838           00274                 goto    EndHighHalf                                                     ;27,28
+                      00275 
+002C   1C27           00276                 btfss   SHIFT5,0                ; check end bit                         ;29
+002D   2838           00277                 goto    EndHighHalf             ; is zero, may be 4 byte packet         ;30,31
+                      00278 
+002E   1440           00279                 bsf     NEW_PACKET              ; fill received packet                  ;31
+002F   0827           00280                 movf    SHIFT5,w                                                        ;32
+0030   00AC           00281                 movwf   DATA3                                                           ;33
+0031   0826           00282                 movf    SHIFT4,w                                                        ;34
+0032   00AB           00283                 movwf   DATA2                                                           ;35
+0033   0825           00284                 movf    SHIFT3,w                                                        ;36
+0034   00AA           00285                 movwf   DATA1                                                           ;37
+0035   0824           00286                 movf    SHIFT2,w                                                        ;38
+0036   00A9           00287                 movwf   DATA0                                                           ;39
+0037   01A3           00288                 clrf    SHIFT1                  ; prevent 4 byte command decoding       ;40
+                      00289 
+0038                  00290 EndHighHalf:
+0038   108B           00291                 bcf     INTCON,INTF                                             ;46     ;31
+0039   1683           00292                 bsf     STATUS,RP0                                              ;47     ;32
+003A   1301           00293                 bcf     OPTION_REG,INTEDG       ; next int. on falling edge GP2 ;48     ;33
+003B                  00294 EndInt:
+003B   0E21           00295                 swapf   INT_STAT,w              ; restore context registers     ;49     ;34
+003C   0083           00296                 movwf   STATUS                                                  ;50     ;35
+003D   0EA0           00297                 swapf   INT_W,f                                                 ;51     ;36
+003E   0E20           00298                 swapf   INT_W,w                                                 ;52     ;37
+003F   0009           00299                 retfie                                                          ;53,54  ;38,39
+                      00300 
+0040                  00301 Int_High_Check4:
+0040   17A2           00302                 bsf     SHIFT0,7                ; command 4 bytes, check 7 preamble bits;23
+0041   0F22           00303                 incfsz  SHIFT0,w                ;'x1111111'                             ;24
+0042   2838           00304                 goto    EndHighHalf                                                     ;25,26
+                      00305 
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE  7
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0043   30F0           00306                 movlw   0xF0                    ; check 4 preamble and start bit        ;26
+0044   0523           00307                 andwf   SHIFT1,w                ; '1111 0 xxx'                          ;27
+0045   3AE0           00308                 xorlw   0xE0                                                            ;28
+0046   1D03           00309                 btfss   STATUS,Z                ;                                       ;29
+0047   2838           00310                 goto    EndHighHalf                                                     ;30,31
+                      00311 
+0048   1440           00312                 bsf     NEW_PACKET              ; fill received packet                  ;32
+0049   15C0           00313                 bsf     DCC4BYTE                ; command 4 bytes                       ;33
+004A   0827           00314                 movf    SHIFT5,w                                                        ;34
+004B   00AC           00315                 movwf   DATA3                                                           ;35
+004C   0826           00316                 movf    SHIFT4,w                                                        ;36
+004D   00AB           00317                 movwf   DATA2                                                           ;37
+004E   0825           00318                 movf    SHIFT3,w                                                        ;38
+004F   00AA           00319                 movwf   DATA1                                                           ;39
+0050   0824           00320                 movf    SHIFT2,w                                                        ;40
+0051   00A9           00321                 movwf   DATA0                                                           ;41
+0052   0823           00322                 movf    SHIFT1,w                                                        ;42
+0053   00A8           00323                 movwf   DATA00                                                          ;43
+0054   2838           00324                 goto    EndHighHalf                                                     ;44,45
+                      00325 
+                      00326 ; ----------------------------------------------------------------------
+                      00327 
+0055                  00328 BitPos:
+0055   0782           00329                 addwf   PCL,f
+                      00330 
+0056   3401           00331                 retlw   0x01
+0057   3402           00332                 retlw   0x02
+0058   3404           00333                 retlw   0x04
+0059   3408           00334                 retlw   0x08
+005A   3410           00335                 retlw   0x10
+005B   3420           00336                 retlw   0x20
+005C   3440           00337                 retlw   0x40
+005D   3480           00338                 retlw   0x80
+                      00339 
+                      00340 ; ----------------------------------------------------------------------
+                      00341 
+005E                  00342 INIT:
+005E   0185           00343                 clrf    GPIO
+005F   3007           00344                 movlw   0x07
+0060   0099           00345                 movwf   CMCON                   ; set GP2:0 to digital I/O
+                      00346 
+0061   1683           00347                 bsf     STATUS,RP0              ; bank 1
+                      00348 #IFDEF __12F675 
+0062   019F           00349     clrf ANSEL   ; for PIC12F675 pins need to be configured as digital inputs
+                      00350 #endif    
+0063   300C           00351                 movlw   GP_TRIS
+0064   0085           00352                 movwf   TRISIO
+0065   23FF           00353                 call    0x3FF                   ; get OSCCAL value
+0066   0090           00354                 movwf   OSCCAL
+0067   3033           00355                 movlw   WPU_INI                 ; pull-ups
+0068   0095           00356                 movwf   WPU
+0069   0196           00357                 clrf    IOC                     ; interrupt on change
+006A   0199           00358                 clrf    VRCON                   ; voltage reference off
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE  8
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+006B   3088           00359                 movlw   OPTION_INI              ; Option register: no pull-up, falling GP2, no prescaler
+                            , wdt 1:1
+006C   0081           00360                 movwf   OPTION_REG
+006D   3001           00361                 movlw   PIE1_INI
+006E   008C           00362                 movwf   PIE1
+006F   1283           00363                 bcf     STATUS,RP0              ; bank 0
+0070   018C           00364                 clrf    PIR1
+0071   3001           00365                 movlw   0x01                    ; Timer 1 on, 1:1
+0072   0090           00366                 movwf   T1CON
+                      00367 
+0073   3020           00368                 movlw   0x20                    ; clear RAM
+0074   0084           00369                 movwf   FSR
+0075                  00370 ClearRAM:
+0075   0180           00371                 clrf    INDF
+0076   0A84           00372                 incf    FSR,f
+0077   3060           00373                 movlw   0x60
+0078   0604           00374                 xorwf   FSR,w
+0079   1D03           00375                 btfss   STATUS,Z
+007A   2875           00376                 goto    ClearRAM
+007B   307D           00377     movlw       SWITCH_PRESS_LONG ; init SWITCH press time
+007C   00C7           00378                 movwf   DEBOUNCE
+007D   1056           00379     bcf PROGRAM_MODE  ; normal operation mode
+007E   30D0           00380                 movlw   INTC_INI
+007F   008B           00381                 movwf   INTCON                  ; enable GP2 external interrupt
+                      00382 
+0080   3096           00383                 movlw   d'150'                  ; init servos default
+0081   00D0           00384                 movwf   PULSE1
+0082   00D1           00385                 movwf   PULSE2
+                      00386 ;               movwf   PULSE3
+                      00387 ;               movwf   PULSE4
+0083   01C2           00388                 clrf    MOVING
+0084   01C3           00389                 clrf    POSITION
+0085   01C4           00390                 clrf    STATE
+                      00391 
+0086   01AD           00392                 clrf    PAGEREG                 ; page register default
+                      00393 
+0087   22CF           00394                 call    LoadCV                  ; load CV values
+                      00395 
+0088   1837           00396                 btfsc   SAVE_OUTPUTS            ; load saved outputs
+0089   22EC           00397                 call    LoadOutputs
+                      00398 
+                      00399 ; ----------------------------------------------------------------------
+                      00400 
+008A                  00401 MainLoop:
+008A   1840           00402                 btfsc   NEW_PACKET              ; new packet?
+008B   21A9           00403                 call    Decode                  ; yes, decode
+                      00404 
+008C   1AC0           00405                 btfsc   DO_PULSE                ; end of servo pulse?
+008D   20CE           00406                 call    DoServo                 ; yes, next pulse
+008E   0064           00407     clrwdt
+008F   288A           00408                 goto    MainLoop
+                      00409 
+                      00410 ; ----------------------------------------------------------------------
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE  9
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00411 
+0090                  00412 Accessory:
+0090   13C0           00413                 bcf     RESET_FLG
+                      00414 
+                      00415                 ;btfss  SWITCH                  ; pressed switch?    ;; ToDO: remove this line
+                      00416     ;goto       AccessProg              ; yes, program new address ;;ToDo: remove this line
+                      00417 
+0091   1856           00418     btfsc PROGRAM_MODE ; new programming mode 
+0092   28B3           00419                 goto    AccessProg              ; yes, program new address
+                      00420 
+0093   0831           00421                 movf    CV521,w                 ; check high address bits
+0094   3880           00422                 iorlw   0x80                    ;'1AAAxxxx'
+0095   1937           00423                 btfsc   PAIR_SEL                ; 
+0096   3804           00424                 iorlw   0x04
+0097   062B           00425                 xorwf   DATA2,w
+0098   39F4           00426                 andlw   0xF4
+0099   1D03           00427                 btfss   STATUS,Z
+009A   2A50           00428                 goto    ExitDecode
+009B   082A           00429                 movf    DATA1,w                 ; check low address bits
+009C   393F           00430                 andlw   0x3F
+009D   0630           00431                 xorwf   CV513,w
+009E   1D03           00432                 btfss   STATUS,Z
+009F   2A50           00433                 goto    ExitDecode
+                      00434 
+00A0                  00435 AccessOut:
+                      00436 
+00A0   082B           00437                 movf    DATA2,w                 ; activate outputs
+00A1   390B           00438                 andlw   0x0B                    ; 'xxxxCDDD'
+00A2   0782           00439                 addwf   PCL,f
+                      00440 
+00A3   2A50           00441                 goto    ExitDecode
+00A4   2A50           00442                 goto    ExitDecode
+00A5   2A50           00443                 goto    ExitDecode
+00A6   2A50           00444                 goto    ExitDecode
+00A7   2A50           00445                 goto    ExitDecode
+00A8   2A50           00446                 goto    ExitDecode
+00A9   2A50           00447                 goto    ExitDecode
+00AA   2A50           00448                 goto    ExitDecode
+00AB   2A2B           00449                 goto    F1A_Set
+00AC   2A30           00450                 goto    F1B_Set
+00AD   2A35           00451                 goto    F2A_Set
+00AE   2A3A           00452                 goto    F2B_Set
+00AF   2A50           00453                 goto    ExitDecode
+00B0   2A50           00454                 goto    ExitDecode
+00B1   2A50           00455                 goto    ExitDecode
+00B2   2A50           00456                 goto    ExitDecode
+                      00457 
+00B3                  00458 AccessProg:
+00B3   1FAB           00459                 btfss   DATA2,7                 ; '10AAAAAA'1AAAxxxx'? accesory operation
+00B4   2A50           00460                 goto    ExitDecode
+00B5   0185           00461                 clrf    GPIO
+00B6   082A           00462                 movf    DATA1,w                 ; get 6 low bits
+00B7   393F           00463                 andlw   0x3F
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 10
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+00B8   00B0           00464                 movwf   CV513
+00B9   00C1           00465                 movwf   EEDATA0
+00BA   3000           00466                 movlw   E_CV513
+00BB   2353           00467                 call    SetParm
+                      00468 
+00BC   0E2B           00469                 swapf   DATA2,w                 ; get 3 high bits
+00BD   3907           00470                 andlw   0x07
+00BE   00B1           00471                 movwf   CV521
+00BF   0EB1           00472                 swapf   CV521,f
+00C0   3A07           00473                 xorlw   0x07                    ; complement bits
+00C1   00C1           00474                 movwf   EEDATA0
+00C2   3008           00475                 movlw   E_CV521
+00C3   2353           00476                 call    SetParm
+                      00477 
+                      00478 
+00C4   1D2B           00479                 btfss   DATA2,2                 ; save pair
+00C5   1137           00480                 bcf     PAIR_SEL
+00C6   192B           00481                 btfsc   DATA2,2
+00C7   1537           00482                 bsf     PAIR_SEL
+00C8   0837           00483                 movf    CV546,w
+00C9   00C1           00484                 movwf   EEDATA0
+00CA   3021           00485                 movlw   E_CV546
+00CB   2353           00486                 call    SetParm
+00CC   20FD           00487     call EndProgMode
+00CD   28A0           00488                 goto    AccessOut
+                      00489 
+                      00490 ; ----------------------------------------------------------------------
+00CE                  00491 DoServo:
+00CE   12C0           00492                 bcf     DO_PULSE
+                      00493 ;               clrf    GPIO                    ; clear all outputs
+00CF   1A0B           00494                 btfsc   INTCON,INTE             ; disabled interrupts?
+00D0   28D7           00495                 goto    DoServoJump
+00D1   01A7           00496                 clrf    SHIFT5                  ; yes, clear for decoding
+00D2   01A6           00497                 clrf    SHIFT4
+00D3   01A5           00498                 clrf    SHIFT3
+00D4   01A4           00499                 clrf    SHIFT2
+00D5   01A3           00500                 clrf    SHIFT1
+00D6   160B           00501                 bsf     INTCON,INTE             ; re-enable interrupts
+00D7                  00502 DoServoJump:
+00D7   0844           00503                 movf    STATE,w
+00D8   0782           00504                 addwf   PCL,f
+00D9   28E1           00505     goto        PulseServo1
+00DA   28EE           00506                 goto    PulseServo2
+00DB   290D           00507                 goto    Spacing
+00DC   01C4           00508                 clrf    STATE                   ; prevents erroneus contents
+00DD   01C4           00509                 clrf    STATE
+00DE   01C4           00510                 clrf    STATE
+00DF   01C4           00511                 clrf    STATE
+00E0   01C4           00512                 clrf    STATE
+                      00513 
+                      00514 
+00E1                  00515 PulseServo1:
+00E1   0836           00516                 movf    CV545,w                 ; init spacing value
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 11
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+00E2   3C00           00517                 sublw   0x00
+00E3   00D4           00518                 movwf   SPACE_H
+00E4   01D5           00519                 clrf    SPACE_L
+                      00520 
+00E5   0850           00521                 movf    PULSE1,w                ; 200: 2ms, 100: 1ms
+00E6   2126           00522                 call    PulseServo
+                      00523 
+00E7   1842           00524                 btfsc   MOVING,0
+00E8   120B           00525                 bcf     INTCON,INTE             ; disable DCC interrupts for time accuracy
+                      00526 
+00E9   1842           00527                 btfsc   MOVING,0
+00EA   1685           00528                 bsf     SERVO1
+                      00529 
+00EB   1410           00530                 bsf     T1CON,TMR1ON            ; run timer 1
+00EC   0AC4           00531                 incf    STATE,f
+00ED   2946           00532                 goto    EndSpacing
+00EE                  00533 PulseServo2:
+00EE   0851           00534                 movf    PULSE2,w                ; 200: 2ms, 100: 1ms
+00EF   2126           00535                 call    PulseServo
+                      00536 
+00F0   18C2           00537                 btfsc   MOVING,1
+00F1   120B           00538                 bcf     INTCON,INTE             ; disable DCC interrupts for time accuracy
+                      00539 
+00F2   18C2           00540                 btfsc   MOVING,1
+00F3   1605           00541                 bsf     SERVO2
+                      00542 
+00F4   1410           00543                 bsf     T1CON,TMR1ON            ; run timer 1
+00F5   0AC4           00544                 incf    STATE,f
+00F6   2947           00545                 goto    EndServo1
+                      00546 
+                      00547 
+00F7                  00548 CheckProgKey:    
+00F7   1985           00549     btfsc       SWITCH                  ; check program switch  
+00F8   2900           00550     goto SwitchIsOff
+00F9   0BC7           00551     decfsz      DEBOUNCE,f              ; wait debounce time (2,5s) = 20ms * 125 
+00FA   0008           00552                 return    ; time not elapsed 
+                      00553     ; mode changed
+00FB   1C56           00554     btfss PROGRAM_MODE
+00FC   2905           00555     goto EnterProgMode
+00FD                  00556 EndProgMode:
+00FD   1056           00557     bcf PROGRAM_MODE;
+                      00558     ; move servos to saved positions
+00FE   22EC           00559     call LoadOutputs
+00FF   0008           00560     return 
+0100                  00561 SwitchIsOff:  ; init debounce time
+0100   307D           00562     movlw       SWITCH_PRESS_LONG  
+0101   1856           00563     btfsc PROGRAM_MODE
+0102   300A           00564     movlw       SWITCH_PRESS_SHORT
+0103   00C7           00565     movwf       DEBOUNCE
+0104   0008           00566     return
+0105                  00567 EnterProgMode:
+0105   1456           00568     bsf PROGRAM_MODE;
+                      00569     ;; move all servos to central position
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 12
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0106   3096           00570     movlw d'150'
+0107   00D0           00571     movwf       PULSE1
+0108   00D1           00572     movwf       PULSE2
+0109   3033           00573     movlw       0x33                    ; do move to reached position
+010A   00C5           00574                 movwf   REACHED
+010B   00C2           00575                 movwf   MOVING
+010C   0008           00576     return
+                      00577     
+                      00578     
+010D                  00579 Spacing:
+010D   1010           00580                 bcf     T1CON,TMR1ON
+010E   0854           00581                 movf    SPACE_H,w
+010F   008F           00582                 movwf   TMR1H
+0110   0855           00583                 movf    SPACE_L,w
+0111   008E           00584                 movwf   TMR1L
+                      00585 ;               bcf     PIR1,TMR1IF
+0112   1410           00586                 bsf     T1CON,TMR1ON            ; run timer 1
+0113   01C4           00587                 clrf    STATE
+                      00588     
+0114   0850           00589                 movf    PULSE1,w                ; check position and change relays
+0115   3C96           00590                 sublw   d'150'  ;
+0116   1856           00591     btfsc PROGRAM_MODE
+0117   1003           00592     bcf STATUS,C    ; set outputs in program mode
+0118   1C03           00593     btfss       STATUS,C
+0119   145F           00594                 bsf     OUTPUT,RELE1
+011A   1803           00595                 btfsc   STATUS,C
+011B   105F           00596                 bcf     OUTPUT,RELE1
+                      00597 
+011C   0851           00598                 movf    PULSE2,w
+011D   3C96           00599                 sublw   d'150'
+011E   1856           00600     btfsc PROGRAM_MODE
+011F   1003           00601     bcf STATUS,C    ; set outputs in program mode
+0120   1C03           00602                 btfss   STATUS,C
+0121   14DF           00603                 bsf     OUTPUT,RELE2
+0122   1803           00604                 btfsc   STATUS,C
+0123   10DF           00605                 bcf     OUTPUT,RELE2
+0124   2178           00606                 call    EndServo2               ; *** 15.08.11
+0125   28F7           00607     goto CheckProgKey     ; ** 20.05.2017
+                      00608 
+0126                  00609 PulseServo:
+0126   1010           00610                 bcf     T1CON,TMR1ON            ; stop timer 1
+0127   018F           00611                 clrf    TMR1H                   ; do x10
+0128   00C8           00612                 movwf   TEMP
+0129   008E           00613                 movwf   TMR1L
+012A   0D8E           00614                 rlf     TMR1L,f
+012B   0D8F           00615                 rlf     TMR1H,f
+012C   0D8E           00616                 rlf     TMR1L,f                 ; x4
+012D   0D8F           00617                 rlf     TMR1H,f
+012E   0D8E           00618                 rlf     TMR1L,f                 ; x8
+012F   0D8F           00619                 rlf     TMR1H,f
+0130   30F8           00620                 movlw   0xF8
+0131   058E           00621                 andwf   TMR1L,f
+0132   0848           00622                 movf    TEMP,w                  ; x8 + x1 = x9
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 13
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0133   078E           00623                 addwf   TMR1L,f
+0134   1803           00624                 btfsc   STATUS,C
+0135   0A8F           00625                 incf    TMR1H,f
+0136   078E           00626                 addwf   TMR1L,f                 ; x9 + x1 = x10
+0137   1803           00627                 btfsc   STATUS,C
+0138   0A8F           00628                 incf    TMR1H,f
+                      00629 
+0139   080E           00630                 movf    TMR1L,w                 ; correct spacing
+013A   07D5           00631                 addwf   SPACE_L,f
+013B   1803           00632                 btfsc   STATUS,C
+013C   0AD4           00633                 incf    SPACE_H,f
+013D   080F           00634                 movf    TMR1H,w
+013E   07D4           00635                 addwf   SPACE_H,f
+                      00636 
+013F   098E           00637                 comf    TMR1L,f                 ; negative for incrementing
+0140   098F           00638                 comf    TMR1H,f
+0141   3001           00639                 movlw   0x01
+0142   078E           00640                 addwf   TMR1L,f
+0143   1803           00641                 btfsc   STATUS,C
+0144   0A8F           00642                 incf    TMR1H,f
+                      00643 ;               bcf     PIR1,TMR1IF
+0145   0008           00644                 return
+                      00645 
+                      00646 
+                      00647 ;----------------------------------------------------------------------
+                      00648 
+0146                  00649 EndSpacing:
+                      00650     
+0146   0008           00651                 return
+                      00652 
+0147                  00653 EndServo1:
+0147   1C42           00654                 btfss   MOVING,0                ; moving servo?
+0148   0008           00655                 return                          ; no
+                      00656 
+0149   1843           00657                 btfsc   POSITION,0              ; yes
+014A   2962           00658                 goto    EndServo1Nxt
+                      00659                 
+014B   1845           00660                 btfsc   REACHED,0
+014C   295C           00661                 goto    EndServo1WW1
+                      00662 
+014D   0BBC           00663                 decfsz  CV547CNT,f              ; speed
+014E   2952           00664                 goto    EndServo1W1
+014F   0838           00665                 movf    CV547,w
+0150   00BC           00666                 movwf   CV547CNT
+0151   03D0           00667                 decf    PULSE1,f
+0152                  00668 EndServo1W1:
+0152   0932           00669                 comf    CV515,w                 ; range (negative)
+0153   3E01           00670                 addlw   0x01
+0154   3E96           00671                 addlw   d'150'
+0155   0650           00672                 xorwf   PULSE1,w
+0156   1D03           00673                 btfss   STATUS,Z
+0157   0008           00674                 return
+0158   3004           00675                 movlw   REACH_PULS
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 14
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0159   00BC           00676                 movwf   CV547CNT
+015A   1445           00677                 bsf     REACHED,0
+015B   0008           00678                 return
+015C                  00679 EndServo1WW1:
+015C   0BBC           00680                 decfsz  CV547CNT,f
+015D   0008           00681                 return
+015E   1045           00682                 bcf     REACHED,0
+015F   1042           00683                 bcf     MOVING,0
+0160   1443           00684                 bsf     POSITION,0
+0161   0008           00685                 return
+0162                  00686 EndServo1Nxt:
+0162   1845           00687                 btfsc   REACHED,0
+0163   2972           00688                 goto    EndServo1WW2
+                      00689 
+0164   0BBC           00690                 decfsz  CV547CNT,f              ; speed
+0165   2969           00691                 goto    EndServo1W2
+0166   0838           00692                 movf    CV547,w
+0167   00BC           00693                 movwf   CV547CNT
+0168   0AD0           00694                 incf    PULSE1,f
+0169                  00695 EndServo1W2:
+0169   3096           00696                 movlw   d'150'                  ; range
+016A   0732           00697                 addwf   CV515,w
+016B   0650           00698                 xorwf   PULSE1,w
+016C   1D03           00699                 btfss   STATUS,Z
+016D   0008           00700                 return
+016E   3004           00701                 movlw   REACH_PULS
+016F   00BC           00702                 movwf   CV547CNT
+0170   1445           00703                 bsf     REACHED,0
+0171   0008           00704                 return
+0172                  00705 EndServo1WW2:
+0172   0BBC           00706                 decfsz  CV547CNT,f
+0173   0008           00707                 return
+0174   1045           00708                 bcf     REACHED,0
+0175   1042           00709                 bcf     MOVING,0
+0176   1043           00710                 bcf     POSITION,0
+0177   0008           00711                 return
+                      00712 
+0178                  00713 EndServo2:
+0178   1CC2           00714                 btfss   MOVING,1                ; moving servo?
+0179   0008           00715                 return                          ; no
+                      00716 
+017A   18C3           00717                 btfsc   POSITION,1              ; yes
+017B   2993           00718                 goto    EndServo2Nxt
+                      00719                 
+017C   18C5           00720                 btfsc   REACHED,1
+017D   298D           00721                 goto    EndServo2WW1
+                      00722 
+017E   0BBD           00723                 decfsz  CV548CNT,f              ; speed
+017F   2983           00724                 goto    EndServo2W1
+0180   0839           00725                 movf    CV548,w
+0181   00BD           00726                 movwf   CV548CNT
+0182   03D1           00727                 decf    PULSE2,f
+0183                  00728 EndServo2W1:
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 15
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0183   0933           00729                 comf    CV516,w                 ; range (negative)
+0184   3E01           00730                 addlw   0x01
+0185   3E96           00731                 addlw   d'150'
+0186   0651           00732                 xorwf   PULSE2,w
+0187   1D03           00733                 btfss   STATUS,Z
+0188   0008           00734                 return
+0189   3004           00735                 movlw   REACH_PULS
+018A   00BD           00736                 movwf   CV548CNT
+018B   14C5           00737                 bsf     REACHED,1
+018C   0008           00738                 return
+018D                  00739 EndServo2WW1:
+018D   0BBD           00740                 decfsz  CV548CNT,f
+018E   0008           00741                 return
+018F   10C5           00742                 bcf     REACHED,1
+0190   10C2           00743                 bcf     MOVING,1
+0191   14C3           00744                 bsf     POSITION,1
+0192   0008           00745                 return
+0193                  00746 EndServo2Nxt:
+0193   18C5           00747                 btfsc   REACHED,1
+0194   29A3           00748                 goto    EndServo2WW2
+                      00749 
+0195   0BBD           00750                 decfsz  CV548CNT,f              ; speed
+0196   299A           00751                 goto    EndServo2W2
+0197   0839           00752                 movf    CV548,w
+0198   00BD           00753                 movwf   CV548CNT
+0199   0AD1           00754                 incf    PULSE2,f
+019A                  00755 EndServo2W2:
+019A   3096           00756                 movlw   d'150'                  ; range
+019B   0733           00757                 addwf   CV516,w
+019C   0651           00758                 xorwf   PULSE2,w
+019D   1D03           00759                 btfss   STATUS,Z
+019E   0008           00760                 return
+019F   3004           00761                 movlw   REACH_PULS
+01A0   00BD           00762                 movwf   CV548CNT
+01A1   14C5           00763                 bsf     REACHED,1
+01A2   0008           00764                 return
+01A3                  00765 EndServo2WW2:
+01A3   0BBD           00766                 decfsz  CV548CNT,f
+01A4   0008           00767                 return
+01A5   10C5           00768                 bcf     REACHED,1
+01A6   10C2           00769                 bcf     MOVING,1
+01A7   10C3           00770                 bcf     POSITION,1
+01A8   0008           00771                 return
+                      00772 
+                      00773 ; ----------------------------------------------------------------------
+                      00774 
+                      00775 
+01A9                  00776 Decode:
+01A9   1040           00777                 bcf     NEW_PACKET              ; prepare for next packet
+01AA   120B           00778                 bcf     INTCON,INTE             ; disable DCC interrupts for more speed
+01AB   19C0           00779                 btfsc   DCC4BYTE
+01AC   29D1           00780                 goto    Decode4bytes
+                      00781 
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 16
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00782 ; 3 byte packets:
+                      00783 ; 1111111111 0 AAAAAAAA 0 DDDDDDDD 0 EEEEEEEE 1
+                      00784 ; '1111 0 AAA' 'AAAAA 0 DD' DDDDDD 0 E' 'EEEEEEE 1'
+                      00785 ;    DATA0        DATA1       DATA2        DATA3
+                      00786 
+01AD                  00787 Decode3bytes:
+01AD   0CA9           00788                 rrf     DATA0,f
+01AE   0CAA           00789                 rrf     DATA1,f
+01AF   0CAB           00790                 rrf     DATA2,f
+01B0   0CAC           00791                 rrf     DATA3,f                 ; 'x1111 0 AA''AAAAAA 0 D''DDDDDDD 0''EEEEEEE'
+01B1   1C03           00792                 btfss   STATUS,C                ; check end bit
+01B2   2A50           00793                 goto    ExitDecode
+                      00794 
+01B3   0CA9           00795                 rrf     DATA0,f                 ; 'xx1111 0 A''AAAAAAA 0''DDDDDDDD''EEEEEEEE'
+01B4   0CAA           00796                 rrf     DATA1,f
+01B5   0CAB           00797                 rrf     DATA2,f
+01B6   1803           00798                 btfsc   STATUS,C                ; check start bit
+01B7   2A50           00799                 goto    ExitDecode
+                      00800 
+01B8   0CA9           00801                 rrf     DATA0,f
+01B9   0CAA           00802                 rrf     DATA1,f                 ; 'xxx1111 0''AAAAAAAA''DDDDDDDD''EEEEEEEE'
+01BA   1803           00803                 btfsc   STATUS,C                ; check start bit
+01BB   2A50           00804                 goto    ExitDecode
+                      00805 
+01BC   082A           00806                 movf    DATA1,w                 ; exclusive or check
+01BD   062B           00807                 xorwf   DATA2,w
+01BE   062C           00808                 xorwf   DATA3,w
+01BF   1D03           00809                 btfss   STATUS,Z                ; valid packet?
+01C0   2A50           00810                 goto    ExitDecode              ; no, return
+                      00811 
+                      00812 ; 'AAAAAAAA''DDDDDDDD''EEEEEEEE'                ; 3 byte packet
+                      00813 ;   DATA1     DATA2     DATA3
+                      00814 
+01C1   082A           00815                 movf    DATA1,w                 ; address = '00000000' ?
+01C2   1903           00816                 btfsc   STATUS,Z
+01C3   2A48           00817                 goto    Broadcast
+                      00818 ;               movf    DATA1,w
+01C4   39F0           00819                 andlw   0xF0
+01C5   3A70           00820                 xorlw   0x70                    ; '0111xxxx'?
+01C6   1903           00821                 btfsc   STATUS,Z
+01C7   2A53           00822                 goto    CheckSM                 ; yes, may be service mode
+                      00823 
+01C8   082A           00824                 movf    DATA1,w
+01C9   39C0           00825                 andlw   0xC0
+01CA   3A80           00826                 xorlw   0x80                    ;'10xxxxxx'? accessory operation
+01CB   1903           00827                 btfsc   STATUS,Z
+01CC   2890           00828                 goto    Accessory
+                      00829 
+01CD   0F2A           00830                 incfsz  DATA1,w                 ;'11111111' idle packet
+01CE   2A50           00831                 goto    ExitDecode
+01CF   160B           00832                 bsf     INTCON,INTE             ; yes, don't clear reset flag
+01D0   0008           00833                 return
+                      00834 
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 17
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00835 ; 4 byte packets:
+                      00836 ; 1111111111 CCCCCCCC 0 AAAAAAAA 0 DDDDDDDD 0 EEEEEEEE 1
+                      00837 ; '111 0 CCCC''CCCC 0 AAA' 'AAAAA 0 DD' DDDDDD 0 E' 'EEEEEEE 1'
+                      00838 ;    DATA00      DATA0        DATA1       DATA2        DATA3
+                      00839 
+                      00840 
+01D1                  00841 Decode4bytes:
+01D1   11C0           00842                 bcf     DCC4BYTE
+01D2   0CA8           00843                 rrf     DATA00,f
+01D3   0CA9           00844                 rrf     DATA0,f
+01D4   0CAA           00845                 rrf     DATA1,f
+01D5   0CAB           00846                 rrf     DATA2,f
+01D6   0CAC           00847                 rrf     DATA3,f                 ; 'x111 0 CCC''CCCCC 0 AA''AAAAAA 0 D''DDDDDDD 0''EEEEEE
+                            E'
+01D7   1C03           00848                 btfss   STATUS,C                ; check end bit
+01D8   2A50           00849                 goto    ExitDecode
+                      00850 
+01D9   0CA8           00851                 rrf     DATA00,f
+01DA   0CA9           00852                 rrf     DATA0,f                 ; 'xx111 0 CC''CCCCCC 0 A''AAAAAAA 0''DDDDDDDD''EEEEEEEE
+                            '
+01DB   0CAA           00853                 rrf     DATA1,f
+01DC   0CAB           00854                 rrf     DATA2,f
+01DD   1803           00855                 btfsc   STATUS,C                ; check start bit
+01DE   2A50           00856                 goto    ExitDecode
+                      00857 
+01DF   0CA8           00858                 rrf     DATA00,f
+01E0   0CA9           00859                 rrf     DATA0,f
+01E1   0CAA           00860                 rrf     DATA1,f                 ; 'xxx111 0 C''CCCCCCC 0''AAAAAAAA''DDDDDDDD''EEEEEEEE'
+01E2   1803           00861                 btfsc   STATUS,C                ; check start bit
+01E3   2A50           00862                 goto    ExitDecode
+                      00863 
+01E4   0CA8           00864                 rrf     DATA00,f
+01E5   0CA9           00865                 rrf     DATA0,f                 ; 'xxxx111 0''CCCCCCCC''AAAAAAAA''DDDDDDDD''EEEEEEEE'
+01E6   1803           00866                 btfsc   STATUS,C                ; check start bit
+01E7   2A50           00867                 goto    ExitDecode
+                      00868 
+                      00869 
+01E8   0829           00870                 movf    DATA0,w                 ; exclusive or check
+01E9   062A           00871                 xorwf   DATA1,w
+01EA   062B           00872                 xorwf   DATA2,w
+01EB   062C           00873                 xorwf   DATA3,w
+01EC   1D03           00874                 btfss   STATUS,Z                ; valid packet?
+01ED   2A50           00875                 goto    ExitDecode              ; no, return
+                      00876 
+                      00877 ; '0111CCAA''AAAAAAAA''DDDDDDDD''EEEEEEEE'      ; Direct mode
+                      00878 ;    DATA0    DATA1     DATA2     DATA3
+                      00879 
+01EE   0829           00880                 movf    DATA0,w
+01EF   39F0           00881                 andlw   0xF0
+01F0   3A70           00882                 xorlw   0x70                    ; '0111xxxx'?
+01F1   1D03           00883                 btfss   STATUS,Z
+01F2   2A50           00884                 goto    ExitDecode              ; yes, may be service mode
+                      00885 
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 18
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+01F3   1FC0           00886                 btfss   RESET_FLG               ; check for SM, reset packet has to come first
+01F4   2A9A           00887                 goto    ServModeError
+01F5   1F40           00888                 btfss   PROG_2X
+01F6   2A98           00889                 goto    SetSM_Flag
+                      00890 
+01F7   1340           00891                 bcf     PROG_2X
+                      00892 ;               bcf     RESET_FLG
+01F8   082B           00893                 movf    DATA2,w                 ; save data
+01F9   00C1           00894                 movwf   EEDATA0
+                      00895 
+01FA   1829           00896                 btfsc   DATA0,0                 ; CV513.. or CV1..
+01FB   2AAA           00897                 goto    ExitProg
+                      00898 
+01FC   082A           00899                 movf    DATA1,w                 ; x0AAAAAAAA
+01FD   2304           00900                 call    FindCV
+01FE   18C0           00901                 btfsc   NOCV
+01FF   2AAA           00902                 goto    ExitProg
+0200                  00903 ProgDirect:
+0200   19A9           00904                 btfsc   DATA0,3 
+0201   2A04           00905                 goto    RomNxt
+0202   1D29           00906                 btfss   DATA0,2
+0203   2AAA           00907                 goto    ExitProg                ;00 not defined
+0204                  00908 RomNxt:
+0204   1D29           00909                 btfss   DATA0,2
+0205   2A10           00910                 goto    BitMan                  ;10 Bit Manipulation
+0206   1DA9           00911                 btfss   DATA0,3
+0207   2A91           00912                 goto    EEVERI                  ;01 Verify byte
+0208                  00913 WriteDirect:                                    ;11 Write byte
+0208   1940           00914                 btfsc   RDONLY
+0209   2A9D           00915                 goto    CheckCV8
+020A   2353           00916                 call    SetParm
+020B   22AC           00917                 call    AckPulse
+020C   1340           00918                 bcf     PROG_2X
+020D   1040           00919                 bcf     NEW_PACKET
+020E   22CF           00920                 call    LoadCV
+020F   2AAA           00921                 goto    ExitProg
+                      00922 
+0210                  00923 BitMan:
+0210   234D           00924                 call    EE_Read
+0211   00C1           00925                 movwf   EEDATA0
+0212   3041           00926                 movlw   EEDATA0
+0213   0084           00927                 movwf   FSR
+0214   3007           00928                 movlw   b'00000111'
+0215   052B           00929                 andwf   DATA2,w
+0216   2055           00930                 call    BitPos
+0217   1E2B           00931                 btfss   DATA2,4                 ; K
+0218   2A21           00932                 goto    Vbit                    ; K=0,verify bit
+0219   19AB           00933                 btfsc   DATA2,3
+021A   0480           00934                 iorwf   INDF,f                  ; D=1,set bit
+021B   3AFF           00935                 xorlw   0xFF
+021C   1DAB           00936                 btfss   DATA2,3
+021D   0580           00937                 andwf   INDF,f                  ; D=0,clear bit
+021E   082A           00938                 movf    DATA1,w
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 19
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+021F   2304           00939                 call    FindCV
+0220   2A00           00940                 goto    ProgDirect              ; write complete byte
+                      00941 
+0221                  00942 Vbit:
+0221   0500           00943                 andwf   INDF,w
+0222   1903           00944                 btfsc   STATUS,Z
+0223   2A27           00945                 goto    BitClear
+0224                  00946 BitSet:
+0224   19AB           00947                 btfsc   DATA2,3                 ;D=0
+0225   2A95           00948                 goto    DoAck                   ;D=1, ack
+0226   2AAA           00949                 goto    ExitProg
+0227                  00950 BitClear:
+0227   1DAB           00951                 btfss   DATA2,3                 ;D=1
+0228   2A95           00952                 goto    DoAck                   ;D=0, ack
+0229   2AAA           00953                 goto    ExitProg
+                      00954                 
+                      00955 
+                      00956 
+                      00957 ; ----------------------------------------------------------------------
+                      00958 
+022A                  00959 F1A_Clear:
+022A                  00960 F1B_Clear:
+022A                  00961 F2A_Clear:
+022A                  00962 F2B_Clear:
+                      00963 
+022A   2A50           00964                 goto    ExitDecode
+                      00965 
+                      00966 
+022B                  00967 F1A_Set:
+022B   1C43           00968                 btfss   POSITION,0
+022C   1442           00969                 bsf     MOVING,0
+022D   0838           00970                 movf    CV547,w
+022E   00BC           00971                 movwf   CV547CNT
+022F   2A3F           00972                 goto    ExitFunction
+0230                  00973 F1B_Set:
+0230   1843           00974                 btfsc   POSITION,0
+0231   1442           00975                 bsf     MOVING,0
+0232   0838           00976                 movf    CV547,w
+0233   00BC           00977                 movwf   CV547CNT
+0234   2A3F           00978                 goto    ExitFunction
+                      00979 
+0235                  00980 F2A_Set:
+0235   1CC3           00981                 btfss   POSITION,1
+0236   14C2           00982                 bsf     MOVING,1
+0237   0839           00983                 movf    CV548,w
+0238   00BD           00984                 movwf   CV548CNT
+0239   2A3F           00985                 goto    ExitFunction
+023A                  00986 F2B_Set:
+023A   18C3           00987                 btfsc   POSITION,1
+023B   14C2           00988                 bsf     MOVING,1
+023C   0839           00989                 movf    CV548,w
+023D   00BD           00990                 movwf   CV548CNT
+023E   2A3F           00991                 goto    ExitFunction
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 20
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+023F                  00992 ExitFunction:
+023F   13C0           00993                 bcf     RESET_FLG
+0240   160B           00994                 bsf     INTCON,INTE             ; enable DCC interrupts
+0241   1C37           00995                 btfss   SAVE_OUTPUTS
+0242   0008           00996                 return
+0243   0943           00997                 comf    POSITION,w              ; save new output state
+0244   0642           00998                 xorwf   MOVING,w
+0245   00C1           00999                 movwf   EEDATA0
+0246   307F           01000                 movlw   EE_OUT
+0247   2B53           01001                 goto    SetParm
+                      01002 
+                      01003 
+                      01004 ; ----------------------------------------------------------------------
+                      01005 
+0248                  01006 Broadcast:
+0248   082B           01007                 movf    DATA2,w                 ; reset packet?
+0249   1D03           01008                 btfss   STATUS,Z
+024A   2A50           01009                 goto    ExitDecode
+024B   1340           01010                 bcf     PROG_2X
+024C   17C0           01011                 bsf     RESET_FLG
+                      01012                                                 ; reset decoder
+024D   0185           01013                 clrf    GPIO
+                      01014 ;               clrf    MOVING
+024E   160B           01015                 bsf     INTCON,INTE             ; enable DCC interrupts
+024F   0008           01016                 return
+                      01017 
+                      01018 
+0250                  01019 ExitDecode:
+0250   13C0           01020                 bcf     RESET_FLG
+0251   160B           01021                 bsf     INTCON,INTE             ; enable DCC interrupts
+0252   0008           01022                 return
+                      01023 
+                      01024 ;************* SM Mode *******************************************
+                      01025 ; Service Mode
+0253                  01026 CheckSM:
+0253   1FC0           01027                 btfss   RESET_FLG               ; check for SM, reset packet has to come first
+0254   2A9A           01028                 goto    ServModeError
+0255   1F40           01029                 btfss   PROG_2X
+0256   2A98           01030                 goto    SetSM_Flag
+                      01031 
+0257   1340           01032                 bcf     PROG_2X
+                      01033 ;               bcf     RESET_FLG
+0258   082B           01034                 movf    DATA2,w                         ; save data
+0259   00C1           01035                 movwf   EEDATA0
+                      01036 
+025A   082A           01037                 movf    DATA1,w                         ; 3 byte programming
+025B   39F7           01038                 andlw   b'11110111'
+025C   3A75           01039                 xorlw   b'01110101'                     ; Reg6
+025D   1903           01040                 btfsc   STATUS,Z                
+025E   2A73           01041                 goto    REG6
+025F   3A01           01042                 xorlw   (b'01110101')^(b'01110100')     ; Reg5
+0260   1903           01043                 btfsc   STATUS,Z                
+0261   2A71           01044                 goto    REG5
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 21
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0262   3A02           01045                 xorlw   (b'01110100')^(b'01110110')     ; reg7
+0263   1903           01046                 btfsc   STATUS,Z
+0264   2A81           01047                 goto    REG7    
+0265   3A01           01048                 xorlw   (b'01110110')^(b'01110111')     ; reg8
+0266   1903           01049                 btfsc   STATUS,Z
+0267   2A85           01050                 goto    REG8    
+                      01051 
+0268   082A           01052                 movf    DATA1,w
+0269   3903           01053                 andlw   0x03
+026A   072D           01054                 addwf   PAGEREG,w
+026B   2304           01055                 call    FindCV
+026C   18C0           01056                 btfsc   NOCV
+026D   2AAA           01057                 goto    ExitProg
+026E                  01058 ProgReg:
+026E   1DAA           01059                 btfss   DATA1,3
+026F   2A91           01060                 goto    EEVERI
+0270   2A89           01061                 goto    EEPROG
+                      01062 
+0271                  01063 REG5:
+0271   301C           01064                 movlw   E_CV541                 ; CV541 configuration
+0272   2A6E           01065                 goto    ProgReg
+                      01066 
+0273                  01067 REG6:
+0273   1DAA           01068                 btfss   DATA1,3                 ; read or write
+0274   2A7B           01069                 goto    REG6RD
+0275   03AB           01070                 decf    DATA2,f                 ; Page register
+0276   0DAB           01071                 rlf     DATA2,f
+0277   0D2B           01072                 rlf     DATA2,w
+0278   39FC           01073                 andlw   b'11111100'             ; page 1 and 129 are the same. CV1 & CV513
+0279   00AD           01074                 movwf   PAGEREG
+027A   2AAA           01075                 goto    ExitProg
+027B                  01076 REG6RD:
+027B   03AB           01077                 decf    DATA2,f                 ; read page register
+027C   0DAB           01078                 rlf     DATA2,f
+027D   0D2B           01079                 rlf     DATA2,w
+027E   39FC           01080                 andlw   b'11111100'             ; page 1 and 129 are the same. CV1 & CV513
+027F   062D           01081                 xorwf   PAGEREG,w
+0280   2A93           01082                 goto    EEVERIP
+                      01083 
+0281                  01084 REG7:   
+0281   3006           01085                 movlw   E_CV7                   ; only read
+0282   1DAA           01086                 btfss   DATA1,3
+0283   2A91           01087                 goto    EEVERI
+0284   2AAA           01088                 goto    ExitProg
+                      01089 
+0285                  01090 REG8:
+0285   3007           01091                 movlw   E_CV8                   ; only read
+0286   1DAA           01092                 btfss   DATA1,3
+0287   2A91           01093                 goto    EEVERI
+0288   2AA0           01094                 goto    CheckResetCV            ; if CV8 = 33 reset CV
+                      01095 
+                      01096         
+0289                  01097 EEPROG:
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 22
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0289   1940           01098                 btfsc   RDONLY
+028A   2A9D           01099                 goto    CheckCV8
+028B   2353           01100                 call    SetParm                 ; program EEPROM
+028C   22AC           01101                 call    AckPulse                ; do ACK
+028D   1340           01102                 bcf     PROG_2X
+028E   1040           01103                 bcf     NEW_PACKET
+028F   22CF           01104                 call    LoadCV
+0290   2AAA           01105                 goto    ExitProg
+                      01106 
+                      01107 
+0291                  01108 EEVERI:
+0291   234D           01109                 call    EE_Read                 ; check data
+0292   062B           01110                 xorwf   DATA2,w
+0293                  01111 EEVERIP:
+0293   1D03           01112                 btfss   STATUS,Z
+0294   2AAA           01113                 goto    ExitProg
+0295                  01114 DoAck:
+0295   22AC           01115                 call    AckPulse                ; equal, do ACK
+0296   1340           01116                 bcf     PROG_2X
+                      01117 ;               bcf     NEW_PACKET
+0297   2AAA           01118                 goto    ExitProg
+                      01119 
+0298                  01120 SetSM_Flag:
+0298   1740           01121                 bsf     PROG_2X
+0299   2AAA           01122                 goto    ExitProg
+                      01123 
+029A                  01124 ServModeError:
+029A   13C0           01125                 bcf     RESET_FLG
+029B   1340           01126                 bcf     PROG_2X
+029C   2AAA           01127                 goto    ExitProg
+                      01128 
+029D                  01129 CheckCV8:
+029D   3A07           01130                 xorlw   E_CV8                   ; CV8?
+029E   1D03           01131                 btfss   STATUS,Z
+029F   2AAA           01132                 goto    ExitProg
+02A0                  01133 CheckResetCV:
+02A0   3021           01134                 movlw   d'33'                   ; CV8 = 33 -> reset CV
+02A1   062B           01135                 xorwf   DATA2,w
+02A2   1D03           01136                 btfss   STATUS,Z
+02A3   2AAA           01137                 goto    ExitProg
+02A4   232C           01138                 call    ResetCV                 ; program CV defaults
+02A5   22AC           01139                 call    AckPulse                ; do ACK
+02A6   1340           01140                 bcf     PROG_2X
+02A7   1040           01141                 bcf     NEW_PACKET
+02A8   22CF           01142                 call    LoadCV
+02A9   2AAA           01143                 goto    ExitProg
+                      01144 
+02AA                  01145 ExitProg:
+02AA   160B           01146                 bsf     INTCON,INTE             ; enable interrupts
+02AB   0008           01147                 return
+                      01148 
+                      01149 
+                      01150 ; -----------------------------------------------------------------------------------
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 23
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      01151 
+02AC                  01152 AckPulse:
+02AC   01C8           01153                 clrf    TEMP
+02AD   3010           01154                 movlw   0x10                    ; all outputs on (1,5ms)
+02AE   0085           01155                 movwf   GPIO
+02AF   0FC8           01156                 incfsz  TEMP,f                  ; 765uS ON      1
+02B0   2AAF           01157                 goto    $-1                     ;               2,3
+                      01158 
+02B1   3030           01159                 movlw   0x30
+02B2   0085           01160                 movwf   GPIO
+02B3   0FC8           01161                 incfsz  TEMP,f                  ; 765uS ON      1
+02B4   2AB3           01162                 goto    $-1                     ;               2,3
+02B5   3020           01163                 movlw   0x20
+02B6   0085           01164                 movwf   GPIO
+02B7   0FC8           01165                 incfsz  TEMP,f                  ; 765uS ON      1
+02B8   2AB7           01166                 goto    $-1                     ;               2,3
+02B9   3000           01167                 movlw   0x00
+02BA   0085           01168                 movwf   GPIO
+02BB   0FC8           01169                 incfsz  TEMP,f                  ; 765uS ON      1
+02BC   2ABB           01170                 goto    $-1                     ;               2,3
+02BD   3010           01171                 movlw   0x10
+02BE   0085           01172                 movwf   GPIO
+02BF   0FC8           01173                 incfsz  TEMP,f                  ; 765uS ON      1
+02C0   2ABF           01174                 goto    $-1                     ;               2,3
+                      01175 
+02C1   3030           01176                 movlw   0x30
+02C2   0085           01177                 movwf   GPIO
+02C3   0FC8           01178                 incfsz  TEMP,f                  ; 765uS ON      1
+02C4   2AC3           01179                 goto    $-1                     ;               2,3
+02C5   3020           01180                 movlw   0x20
+02C6   0085           01181                 movwf   GPIO
+02C7   0FC8           01182                 incfsz  TEMP,f                  ; 765uS ON      1
+02C8   2AC7           01183                 goto    $-1                     ;               2,3
+02C9   3000           01184                 movlw   0x00
+02CA   0085           01185                 movwf   GPIO
+02CB   0FC8           01186                 incfsz  TEMP,f                  ; 765uS ON      1
+02CC   2ACB           01187                 goto    $-1                     ;               2,3
+02CD   0185           01188                 clrf    GPIO
+02CE   0008           01189                 return
+                      01190 
+                      01191 
+02CF                  01192 LoadCV:
+02CF   3000           01193                 movlw   E_CV513                 ; address low
+02D0   234D           01194                 call    EE_Read
+02D1   00B0           01195                 movwf   CV513
+02D2   3008           01196                 movlw   E_CV521                 ; address high
+02D3   234D           01197                 call    EE_Read
+02D4   00B1           01198                 movwf   CV521
+02D5   0EB1           01199                 swapf   CV521,f
+02D6   0931           01200                 comf    CV521,w                 ; top address is complemented
+02D7   3970           01201                 andlw   0x70
+02D8   00B1           01202                 movwf   CV521                   ; now CV521='0AAA0000'
+                      01203 
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 24
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+02D9   3002           01204                 movlw   E_CV515                 ; range servo1
+02DA   234D           01205                 call    EE_Read
+02DB   00B2           01206                 movwf   CV515
+02DC   3003           01207                 movlw   E_CV516                 ; range servo2
+02DD   234D           01208                 call    EE_Read
+02DE   00B3           01209                 movwf   CV516
+                      01210 
+02DF   3022           01211                 movlw   E_CV547                 ; speed servo1
+02E0   234D           01212                 call    EE_Read
+02E1   00B8           01213                 movwf   CV547
+02E2   3023           01214                 movlw   E_CV548                 ; speed servo2
+02E3   234D           01215                 call    EE_Read
+02E4   00B9           01216                 movwf   CV548
+                      01217 
+02E5   3020           01218                 movlw   E_CV545                 ; spacing
+02E6   234D           01219                 call    EE_Read
+02E7   00B6           01220                 movwf   CV545
+                      01221 
+02E8   3021           01222                 movlw   E_CV546                 ; flags
+02E9   234D           01223                 call    EE_Read
+02EA   00B7           01224                 movwf   CV546
+                      01225 
+02EB   0008           01226                 return
+                      01227 
+                      01228 
+02EC                  01229 LoadOutputs:
+02EC   307F           01230                 movlw   EE_OUT                  ; read saved outputs
+02ED   234D           01231                 call    EE_Read
+02EE   00C3           01232                 movwf   POSITION                        
+                      01233 
+02EF   0832           01234                 movf    CV515,w                 ; calculate pulse for position
+02F0   1C43           01235                 btfss   POSITION,0
+02F1   3AFF           01236                 xorlw   0xFF
+02F2   1C43           01237                 btfss   POSITION,0
+02F3   3E01           01238                 addlw   0x01
+02F4   3E96           01239                 addlw   d'150'
+02F5   00D0           01240                 movwf   PULSE1
+                      01241 
+02F6   0833           01242                 movf    CV516,w                 ; calculate pulse for position
+02F7   1CC3           01243                 btfss   POSITION,1
+02F8   3AFF           01244                 xorlw   0xFF
+02F9   1CC3           01245                 btfss   POSITION,1
+02FA   3E01           01246                 addlw   0x01
+02FB   3E96           01247                 addlw   d'150'
+02FC   00D1           01248                 movwf   PULSE2
+                      01249 
+                      01250 
+02FD   3010           01251                 movlw   0x10                    ; pulses for setting position
+02FE   00BC           01252                 movwf   CV547CNT
+02FF   00BD           01253                 movwf   CV548CNT
+0300   3033           01254                 movlw   0x33                    ; do move to reached position
+0301   00C5           01255                 movwf   REACHED
+0302   00C2           01256                 movwf   MOVING
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 25
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0303   0008           01257                 return
+                      01258 
+                      01259 
+                      01260 ; -----------------------------------------------------------------------------------
+                      01261 
+0304                  01262 FindCV:
+0304   1C56           01263     btfss PROGRAM_MODE ;CV write is possibile only in PROGRAM_MODE
+0305   2B2A           01264     goto CvNotFound
+0306   10C0           01265                 bcf     NOCV
+0307   1140           01266                 bcf     RDONLY
+                      01267 
+0308   3A00           01268     xorlw       0x00                    ; CV513
+0309   1903           01269                 btfsc   STATUS,Z
+030A   3400           01270                 retlw   E_CV513
+030B   3A08           01271                 xorlw   (0x00 ^ 0x08)           ; CV521
+030C   1903           01272                 btfsc   STATUS,Z
+030D   3408           01273                 retlw   E_CV521
+030E   3A14           01274                 xorlw   (0x08 ^ 0x1C)           ; CV541
+030F   1903           01275                 btfsc   STATUS,Z
+0310   341C           01276                 retlw   E_CV541
+0311   3A1E           01277                 xorlw   (0x1C ^ 0x02)           ; CV515
+0312   1903           01278                 btfsc   STATUS,Z
+0313   3402           01279                 retlw   E_CV515
+0314   3A01           01280                 xorlw   (0x02 ^ 0x03)           ; CV516
+0315   1903           01281                 btfsc   STATUS,Z
+0316   3403           01282                 retlw   E_CV516
+0317   3A23           01283                 xorlw   (0x03 ^ 0x20)           ; CV545 
+0318   1903           01284                 btfsc   STATUS,Z
+0319   3420           01285                 retlw   E_CV545
+031A   3A01           01286                 xorlw   (0x20 ^ 0x21)           ; CV546
+031B   1903           01287                 btfsc   STATUS,Z
+031C   3421           01288                 retlw   E_CV546
+031D   3A03           01289                 xorlw   (0x21 ^ 0x22)           ; CV547
+031E   1903           01290                 btfsc   STATUS,Z
+031F   3422           01291                 retlw   E_CV547
+0320   3A01           01292                 xorlw   (0x22 ^ 0x23)           ; CV548
+0321   1903           01293                 btfsc   STATUS,Z
+0322   3423           01294                 retlw   E_CV548
+                      01295 
+                      01296 
+0323   1540           01297                 bsf     RDONLY
+0324   3A25           01298                 xorlw   (0x23 ^ 0x06)           ; CV519
+0325   1903           01299                 btfsc   STATUS,Z
+0326   3406           01300                 retlw   E_CV7
+0327   3A01           01301                 xorlw   (0x06 ^ 0x07)           ; CV520
+0328   1903           01302                 btfsc   STATUS,Z
+0329   3407           01303                 retlw   E_CV8
+032A                  01304 CvNotFound:
+032A   14C0           01305                 bsf     NOCV                    ; CV not finded
+032B   347F           01306                 retlw   0x7F                    ; return last location
+                      01307 
+                      01308 ;---------------------------------------------------------------------------
+                      01309 
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 26
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+032C                  01310 ResetCV:
+032C   3001           01311                 movlw   0x01                    ; reset CV to default values
+032D   00C1           01312                 movwf   EEDATA0
+032E   3000           01313                 movlw   E_CV513
+032F   2353           01314                 call    SetParm
+                      01315                 
+0330   3032           01316                 movlw   0x32
+0331   00C1           01317                 movwf   EEDATA0
+0332   3002           01318                 movlw   E_CV515
+0333   2353           01319                 call    SetParm
+0334   3003           01320                 movlw   E_CV516
+0335   2353           01321                 call    SetParm
+                      01322 
+0336   3000           01323                 movlw   0x00
+0337   00C1           01324                 movwf   EEDATA0
+0338   3008           01325                 movlw   E_CV521
+0339   2353           01326                 call    SetParm
+                      01327 
+033A   3001           01328                 movlw   0x01
+033B   00C1           01329                 movwf   EEDATA0
+033C   3022           01330                 movlw   E_CV547
+033D   2353           01331                 call    SetParm
+033E   3023           01332                 movlw   E_CV548
+033F   2353           01333                 call    SetParm
+                      01334 
+0340   304E           01335                 movlw   0x4E
+0341   00C1           01336                 movwf   EEDATA0
+0342   3020           01337                 movlw   E_CV545
+0343   2353           01338                 call    SetParm
+                      01339 
+0344   3080           01340                 movlw   0x80
+0345   00C1           01341                 movwf   EEDATA0
+0346   301C           01342                 movlw   E_CV541
+0347   2353           01343                 call    SetParm
+                      01344 
+0348   3001           01345                 movlw   0x01
+0349   00C1           01346                 movwf   EEDATA0
+034A   3021           01347                 movlw   E_CV546
+034B   2353           01348                 call    SetParm
+                      01349 
+034C   0008           01350                 return
+                      01351 
+                      01352 
+                      01353 ;---------------------------------------------------------------------------
+                      01354 
+034D                  01355 EE_Read:
+034D   1683           01356                 bsf     STATUS,RP0              ; w=ADR
+034E   009B           01357                 movwf   EEADR
+034F   141C           01358                 bsf     EECON1,RD
+0350   081A           01359                 movf    EEDATA,w
+0351   1283           01360                 bcf     STATUS,RP0
+0352   0008           01361                 return
+                      01362 
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 27
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0353                  01363 SetParm:
+0353   234D           01364                 call    EE_Read                 ; w=ADR, EEDATA0=data. Write only changes
+0354   0641           01365                 xorwf   EEDATA0,w
+0355   1903           01366                 btfsc   STATUS,Z
+0356   0008           01367                 return
+0357                  01368 EE_Write:               
+0357   0841           01369                 movf    EEDATA0,w
+0358   1683           01370                 bsf     STATUS,RP0
+0359   009A           01371                 movwf   EEDATA
+035A   151C           01372                 bsf     EECON1,WREN
+035B   138B           01373                 bcf     INTCON,GIE
+035C   3055           01374                 movlw   0x55
+035D   009D           01375                 movwf   EECON2
+035E   30AA           01376                 movlw   0xAA
+035F   009D           01377                 movwf   EECON2
+0360   149C           01378                 bsf     EECON1,WR
+0361   178B           01379                 bsf     INTCON,GIE
+0362   111C           01380                 bcf     EECON1,WREN
+0363                  01381 EEWrite0:
+0363   189C           01382                 btfsc   EECON1,WR
+0364   2B63           01383                 goto    EEWrite0
+0365   1283           01384                 bcf     STATUS,RP0
+0366   0008           01385                 return
+                      01386 
+                      01387 
+                      01388 
+                      01389 ; ----- EEPROM default values
+                      01390 
+                      01391 
+2100                  01392                 org     0x2100
+                      01393 
+2100   0001           01394                 dw      0x01                    ; CV513 Primary Adress (low bits)
+2101   00FF           01395                 dw      0xFF                    ; 
+2102   0032           01396                 dw      0x32                    ; CV515 Range servo 1 (in 10us)
+2103   0032           01397                 dw      0x32                    ; CV516 Range servo 2
+2104   0032           01398                 dw      0x32                    ; CV517 Range servo 3
+2105   0032           01399                 dw      0x32                    ; CV518 Range servo 4
+2106   0014           01400                 dw      0x14                    ; CV519 Manufacturer Version
+2107   000D           01401                 dw      0x0D                    ; CV520 Manufacturer ID
+2108   0000           01402                 dw      0x00                    ; CV521 Primary Adress (high bits)
+2109   00FF           01403                 dw      0xFF                    ; 
+210A   00FF           01404                 dw      0xFF                    ; 
+210B   00FF           01405                 dw      0xFF                    ; 
+210C   00FF           01406                 dw      0xFF                    ; 
+210D   00FF           01407                 dw      0xFF                    ; 
+210E   00FF           01408                 dw      0xFF                    ; 
+210F   00FF           01409                 dw      0xFF                    ; 
+2110   00FF           01410                 dw      0xFF                    ; 
+2111   00FF           01411                 dw      0xFF                    ; 
+2112   00FF           01412                 dw      0xFF                    ; 
+2113   00FF           01413                 dw      0xFF                    ; 
+2114   00FF           01414                 dw      0xFF                    ; 
+2115   00FF           01415                 dw      0xFF                    ; 
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 28
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+2116   00FF           01416                 dw      0xFF                    ; 
+2117   00FF           01417                 dw      0xFF                    ; 
+2118   00FF           01418                 dw      0xFF                    ; 
+2119   00FF           01419                 dw      0xFF                    ; 
+211A   00FF           01420                 dw      0xFF                    ; 
+211B   00FF           01421                 dw      0xFF                    ; 
+211C   0080           01422                 dw      0x80                    ; CV541 Config
+211D   00FF           01423                 dw      0xFF                    ; 
+211E   00FF           01424                 dw      0xFF                    ; 
+211F   00FF           01425                 dw      0xFF                    ; 
+2120   004E           01426                 dw      0x4E                    ; CV545 Spacing (in 256us)
+2121   0001           01427                 dw      0x01                    ; CV546 Accesory flags
+2122   0001           01428                 dw      0x01                    ; CV547 Speed servo 1
+2123   0001           01429                 dw      0x01                    ; CV548 Speed servo 2
+2124   0001           01430                 dw      0x01                    ; CV549 Speed servo 3
+2125   0001           01431                 dw      0x01                    ; CV550 Speed servo 4
+                      01432 
+                      01433 
+2130                  01434                 org     0x2130
+                      01435 
+2130   3432 3453 3452 01436                 dt      "2SRV2RLY"
+       3456 3432 3452 
+       344C 3459 
+2138   3446 342E 3443 01437                 dt      "F.Cañada"
+       3461 34F1 3461 
+       3464 3461 
+2140   3432           01438                 dt      (__VERDAY   >> 4)  +0x30
+2141   3433 342F      01439                 dt      (__VERDAY   & 0x0F)+0x30,"/"
+2143   3430           01440                 dt      (__VERMONTH >> 4)  +0x30
+2144   3435 342F      01441                 dt      (__VERMONTH & 0x0F)+0x30,"/"
+2146   3431           01442                 dt      (__VERYEAR  >> 4)  +0x30
+2147   3437           01443                 dt      (__VERYEAR  & 0x0F)+0x30
+                      01444 
+217F                  01445                 org     0x217F
+                      01446 
+217F   0000           01447                 dw      0x00                    ; default position
+                      01448 
+                      01449 
+                      01450         end
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 29
+
+
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+ADCON0                            0000001F
+ADCS0                             00000004
+ADCS1                             00000005
+ADCS2                             00000006
+ADFM                              00000007
+ADIE                              00000006
+ADIF                              00000006
+ADON                              00000000
+ADRESH                            0000001E
+ADRESL                            0000009E
+ANS0                              00000000
+ANS1                              00000001
+ANS2                              00000002
+ANS3                              00000003
+ANSEL                             0000009F
+AccessOut                         000000A0
+AccessProg                        000000B3
+Accessory                         00000090
+AckPulse                          000002AC
+BitClear                          00000227
+BitMan                            00000210
+BitPos                            00000055
+BitSet                            00000224
+Broadcast                         00000248
+C                                 00000000
+CAL0                              00000002
+CAL1                              00000003
+CAL2                              00000004
+CAL3                              00000005
+CAL4                              00000006
+CAL5                              00000007
+CHS0                              00000002
+CHS1                              00000003
+CINV                              00000004
+CIS                               00000003
+CM0                               00000000
+CM1                               00000001
+CM2                               00000002
+CMCON                             00000019
+CMIE                              00000003
+CMIF                              00000003
+COUNT                             00000049
+COUT                              00000006
+CV513                             00000030
+CV515                             00000032
+CV516                             00000033
+CV521                             00000031
+CV545                             00000036
+CV546                             00000037
+CV547                             00000038
+CV547CNT                          0000003C
+CV548                             00000039
+CV548CNT                          0000003D
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 30
+
+
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+CheckCV8                          0000029D
+CheckProgKey                      000000F7
+CheckResetCV                      000002A0
+CheckSM                           00000253
+ClearRAM                          00000075
+CvNotFound                        0000032A
+DATA0                             00000029
+DATA00                            00000028
+DATA1                             0000002A
+DATA2                             0000002B
+DATA3                             0000002C
+DC                                00000001
+DCC4BYTE                          FLAGS,3
+DCCIN                             GPIO,2
+DEBOUNCE                          00000047
+DO_PULSE                          FLAGS,5
+Decode                            000001A9
+Decode3bytes                      000001AD
+Decode4bytes                      000001D1
+DoAck                             00000295
+DoServo                           000000CE
+DoServoJump                       000000D7
+EEADR                             0000009B
+EECON1                            0000009C
+EECON2                            0000009D
+EEDAT                             0000009A
+EEDATA                            0000009A
+EEDATA0                           00000041
+EEIE                              00000007
+EEIF                              00000007
+EEPROG                            00000289
+EEVERI                            00000291
+EEVERIP                           00000293
+EEWrite0                          00000363
+EE_INI                            0x00
+EE_OUT                            0000007F
+EE_Read                           0000034D
+EE_Write                          00000357
+E_CV513                           00000000
+E_CV515                           00000002
+E_CV516                           00000003
+E_CV521                           00000008
+E_CV541                           0000001C
+E_CV545                           00000020
+E_CV546                           00000021
+E_CV547                           00000022
+E_CV548                           00000023
+E_CV7                             00000006
+E_CV8                             00000007
+EndHighHalf                       00000038
+EndInt                            0000003B
+EndProgMode                       000000FD
+EndServo1                         00000147
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 31
+
+
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+EndServo1Nxt                      00000162
+EndServo1W1                       00000152
+EndServo1W2                       00000169
+EndServo1WW1                      0000015C
+EndServo1WW2                      00000172
+EndServo2                         00000178
+EndServo2Nxt                      00000193
+EndServo2W1                       00000183
+EndServo2W2                       0000019A
+EndServo2WW1                      0000018D
+EndServo2WW2                      000001A3
+EndSpacing                        00000146
+EnterProgMode                     00000105
+ExitDecode                        00000250
+ExitFunction                      0000023F
+ExitProg                          000002AA
+F                                 00000001
+F1A_Clear                         0000022A
+F1A_Set                           0000022B
+F1B_Clear                         0000022A
+F1B_Set                           00000230
+F2A_Clear                         0000022A
+F2A_Set                           00000235
+F2B_Clear                         0000022A
+F2B_Set                           0000023A
+FLAGS                             00000040
+FSR                               00000004
+FXTAL                             003D0900
+FindCV                            00000304
+GIE                               00000007
+GO                                00000001
+GO_DONE                           00000001
+GO_NOT_DONE                       00000001
+GP0                               00000000
+GP1                               00000001
+GP2                               00000002
+GP3                               00000003
+GP4                               00000004
+GP5                               00000005
+GPIE                              00000003
+GPIF                              00000000
+GPIO                              00000005
+GPIO0                             00000000
+GPIO1                             00000001
+GPIO2                             00000002
+GPIO3                             00000003
+GPIO4                             00000004
+GPIO5                             00000005
+GP_INI                            00000000
+GP_TRIS                           0000000C
+INDF                              00000000
+INIT                              0000005E
+INTCON                            0000000B
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 32
+
+
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+INTC_INI                          000000D0
+INTE                              00000004
+INTEDG                            00000006
+INTF                              00000001
+INT_STAT                          00000021
+INT_W                             00000020
+IOC                               00000096
+IOC0                              00000000
+IOC1                              00000001
+IOC2                              00000002
+IOC3                              00000003
+IOC4                              00000004
+IOC5                              00000005
+IOCB                              00000096
+IOCB0                             00000000
+IOCB1                             00000001
+IOCB2                             00000002
+IOCB3                             00000003
+IOCB4                             00000004
+IOCB5                             00000005
+IRP                               00000007
+Int_DCC                           0000000E
+Int_High_Check3                   00000027
+Int_High_Check4                   00000040
+Int_High_Half                     00000019
+Int_Low_Half                      00000012
+Interrupt                         00000004
+LoadCV                            000002CF
+LoadOutputs                       000002EC
+MODE                              00000056
+MOVING                            00000042
+MainLoop                          0000008A
+NEW_PACKET                        FLAGS,0
+NOCV                              FLAGS,1
+NOT_BOD                           00000000
+NOT_BOR                           00000000
+NOT_DONE                          00000001
+NOT_GPPU                          00000007
+NOT_PD                            00000003
+NOT_POR                           00000001
+NOT_T1SYNC                        00000002
+NOT_TO                            00000004
+OPTION_INI                        00000088
+OPTION_REG                        00000081
+OSCCAL                            00000090
+OUTPUT                            0000005F
+PAGEREG                           0000002D
+PAIR_SEL                          CV546,2
+PCL                               00000002
+PCLATH                            0000000A
+PCON                              0000008E
+PEIE                              00000006
+PIE1                              0000008C
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 33
+
+
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+PIE1_INI                          00000001
+PIR1                              0000000C
+POSITION                          00000043
+PROGRAM_MODE                      MODE,0
+PROG_2X                           FLAGS,6
+PS0                               00000000
+PS1                               00000001
+PS2                               00000002
+PSA                               00000003
+PULSE1                            00000050
+PULSE2                            00000051
+PowerUp                           00000000
+ProgDirect                        00000200
+ProgReg                           0000026E
+PulseServo                        00000126
+PulseServo1                       000000E1
+PulseServo2                       000000EE
+RAMINI0                           0x020
+RD                                00000000
+RDONLY                            FLAGS,2
+REACHED                           00000045
+REACH_PULS                        00000004
+REG5                              00000271
+REG6                              00000273
+REG6RD                            0000027B
+REG7                              00000281
+REG8                              00000285
+RELE1                             0
+RELE2                             1
+RESET_FLG                         FLAGS,7
+RP0                               00000005
+RP1                               00000006
+ResetCV                           0000032C
+RomNxt                            00000204
+SAVE_OUTPUTS                      CV546,0
+SERVO1                            GPIO,5
+SERVO2                            GPIO,4
+SHIFT0                            00000022
+SHIFT1                            00000023
+SHIFT2                            00000024
+SHIFT3                            00000025
+SHIFT4                            00000026
+SHIFT5                            00000027
+SPACE_H                           00000054
+SPACE_L                           00000055
+STATE                             00000044
+STATUS                            00000003
+SWITCH                            GPIO,3
+SWITCH_PRESS_LONG                 0000007D
+SWITCH_PRESS_SHORT                0000000A
+ServModeError                     0000029A
+SetParm                           00000353
+SetSM_Flag                        00000298
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 34
+
+
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+Spacing                           0000010D
+SwitchIsOff                       00000100
+T0CS                              00000005
+T0IE                              00000005
+T0IF                              00000002
+T0SE                              00000004
+T1CKPS0                           00000004
+T1CKPS1                           00000005
+T1CON                             00000010
+T1IE                              00000000
+T1IF                              00000000
+T1OSCEN                           00000003
+TEMP                              00000048
+TMR0                              00000001
+TMR0IE                            00000005
+TMR0IF                            00000002
+TMR1                              0000000E
+TMR1CS                            00000001
+TMR1GE                            00000006
+TMR1H                             0000000F
+TMR1IE                            00000000
+TMR1IF                            00000000
+TMR1L                             0000000E
+TMR1ON                            00000000
+TRISIO                            00000085
+TRISIO0                           00000000
+TRISIO1                           00000001
+TRISIO2                           00000002
+TRISIO3                           00000003
+TRISIO4                           00000004
+TRISIO5                           00000005
+VCFG                              00000006
+VR0                               00000000
+VR1                               00000001
+VR2                               00000002
+VR3                               00000003
+VRCON                             00000099
+VREN                              00000007
+VRR                               00000005
+Vbit                              00000221
+W                                 00000000
+WPU                               00000095
+WPU0                              00000000
+WPU1                              00000001
+WPU2                              00000002
+WPU4                              00000004
+WPU5                              00000005
+WPU_INI                           00000033
+WR                                00000001
+WREN                              00000002
+WRERR                             00000003
+WriteDirect                       00000208
+Z                                 00000002
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 35
+
+
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+_BODEN_OFF                        00003FBF
+_BODEN_ON                         00003FFF
+_BOREN_OFF                        00003FBF
+_BOREN_ON                         00003FFF
+_CONFIG                           00002007
+_CPD_OFF                          00003FFF
+_CPD_ON                           00003EFF
+_CP_OFF                           00003FFF
+_CP_ON                            00003F7F
+_DEVID1                           00002006
+_EC_OSC                           00003FFB
+_EXTRC_OSC_CLKOUT                 00003FFF
+_EXTRC_OSC_NOCLKOUT               00003FFE
+_FOSC_EC                          00003FFB
+_FOSC_EXTRCCLK                    00003FFF
+_FOSC_EXTRCIO                     00003FFE
+_FOSC_HS                          00003FFA
+_FOSC_INTRCCLK                    00003FFD
+_FOSC_INTRCIO                     00003FFC
+_FOSC_LP                          00003FF8
+_FOSC_XT                          00003FF9
+_HS_OSC                           00003FFA
+_IDLOC0                           00002000
+_IDLOC1                           00002001
+_IDLOC2                           00002002
+_IDLOC3                           00002003
+_INTRC_OSC_CLKOUT                 00003FFD
+_INTRC_OSC_NOCLKOUT               00003FFC
+_LP_OSC                           00003FF8
+_MCLRE_OFF                        00003FDF
+_MCLRE_ON                         00003FFF
+_PWRTE_OFF                        00003FFF
+_PWRTE_ON                         00003FEF
+_WDTE_OFF                         00003FF7
+_WDTE_ON                          00003FFF
+_WDT_OFF                          00003FF7
+_WDT_ON                           00003FFF
+_XT_OSC                           00003FF9
+__12F675                          00000001
+__VERDAY                          0x23
+__VERMONTH                        0x05
+__VERNUM                          D'2'
+__VERYEAR                         0x17
+MPASM 5.64                     DCC2SERVO.ASM   5-28-2017  21:13:01         PAGE 36
+
+
+MEMORY USAGE MAP ('X' = Used,  '-' = Unused)
+
+
+0000 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0040 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0080 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+00C0 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0100 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0140 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0180 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+01C0 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0200 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0240 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0280 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+02C0 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0300 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0340 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXX--------- ----------------
+2000 : -------X-------- ---------------- ---------------- ----------------
+2100 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXX---------- XXXXXXXXXXXXXXXX
+2140 : XXXXXXXX-------- ---------------- ---------------- ---------------X
+
+All other memory blocks unused.
+
+Program Memory Words Used:   871
+Program Memory Words Free:   153
+
+
+Errors   :     0
+Warnings :     0 reported,     0 suppressed
+Messages :     0 reported,    20 suppressed
+
+

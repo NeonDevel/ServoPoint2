@@ -1,0 +1,28 @@
+Servopoint2 Partlist (dcc2servo2relay)
+
+
+Part     Value          Device             Package  Library      Sheet
+
+B1                      B-DIL              B-DIL    rectifier    1
+C1       220uF 35V      CPOL-EUE5-10.5     E5-10,5  rcl          1
+C2       100nF          C-EUC1206          C1206    rcl          1
+D1       1N4148         1N4148             DO35-10  diode        1
+D2       1N4148         1N4148             DO35-10  diode        1
+IC1      PIC12F829      PIC12C509P         DIL8     microchip    1
+IC2      7805           78XXS              78XXS    v-reg        1
+JP1                     PINHD-1X3          1X03     pinhead      1
+JP2                     PINHD-1X3          1X03     pinhead      1
+K1       G5L            G5L                G5LE     relay        1
+K2       G5L            G5L                G5LE     relay        1
+R1       22k            R-EU_0309/10       0309/10  rcl          1
+R2       15k            R-EU_R1206         R1206    rcl          1
+R3       4k7            R-EU_R1206         R1206    rcl          1
+R4       4k7            R-EU_R1206         R1206    rcl          1
+R5       270 - 390      R-EU_0309/10       0309/10  rcl          1
+R6       270 - 390      R-EU_0309/10       0309/10  rcl          1
+S1                      10-XX              B3F-10XX switch-omron 1
+T1       BC547          BC487-NPN-TO92-EBC TO92-EBC transistor   1
+T2       BC547          BC487-NPN-TO92-EBC TO92-EBC transistor   1
+X1                      W237-02P           W237-132 con-wago-508 1
+X2                      W237-3E            W237-3E  con-wago-508 1
+X3                      W237-3E            W237-3E  con-wago-508 1
