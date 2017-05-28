@@ -5,7 +5,7 @@
 
 This project is based on [ServoPoint2 by Paco Cańada](http://usuaris.tinet.cat/fmco/home_en.htm)
 
-* Platform:  Microchip PIC12F675 and PIC12F729
+* Platform:  Microchip PIC12F675 and PIC12F629
 * Software Tools: MPLAB X IDE (mpasmx)
 
 ### Major improvements:
